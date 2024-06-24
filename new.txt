@@ -1,3 +1,22 @@
+version: 2
+
+sources:
+  - name: gcs_data
+    description: "Data sourced from Google Cloud Storage."
+    database: your_bigquery_database
+    schema: your_bigquery_schema
+    tables:
+      - name: json_external_table
+        description: "External table for JSON files stored in GCS."
+        external:
+          location: "gs://your-bucket-name/path-to-json-files/*.json"
+          auto_detect: True
+          source_format: "NEWLINE_DELIMITED_JSON"
+
+
+
+
+
 hitting dbt  models in kubernetes  using cloud composer
 ChatGPT
 To run dbt models in Kubernetes using Cloud Composer, follow these steps:
