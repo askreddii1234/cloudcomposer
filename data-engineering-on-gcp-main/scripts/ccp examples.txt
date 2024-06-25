@@ -1,0 +1,364 @@
+Use Case: Daily Sales Processing and Report Generation
+Method 1: Using TriggerDagRunOperator
+In this example, the first DAG processes daily sales data. Upon successful completion, it will trigger the second DAG which generates sales reports.
+
+DAG 1: Sales Data Processing
+
+
+# File: dags/sales_processing.py
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.operators.dagrun_operator import TriggerDagRunOperator
+
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+    'start_date': datetime(2024, 1, 1),
+}
+
+def process_sales(**kwargs):
+    # Placeholder for sales processing logic
+    print("Sales data processed.")
+
+with DAG('sales_processing',
+         default_args=default_args,
+         description='A DAG to process sales data',
+         schedule_interval=timedelta(days=1),
+         catchup=False) as dag:
+
+    process_sales_task = PythonOperator(
+        task_id='process_sales',
+        python_callable=process_sales
+    )
+
+    trigger_report_generation = TriggerDagRunOperator(
+        task_id='trigger_report_generation',
+        trigger_dag_id='sales_report_generation',  # Ensure this matches the DAG ID of your second DAG
+    )
+
+    process_sales_task >> trigger_report_generation
+
+DAG 2: Sales Report Generation
+
+
+# File: dags/report_generation.py
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+    'start_date': datetime(2024, 1, 1),
+}
+
+def generate_report(**kwargs):
+    # Placeholder for report generation logic
+    print("Sales report generated.")
+
+with DAG('sales_report_generation',
+         default_args=default_args,
+         description='A DAG to generate sales reports',
+         schedule_interval=None,  # Triggered by another DAG
+         catchup=False) as dag:
+
+    generate_report_task = PythonOperator(
+        task_id='generate_report',
+        python_callable=generate_report
+    )
+
+
+
+Method 2: Using ExternalTaskSensor
+Instead of using TriggerDagRunOperator, you could set the second DAG to start after confirming the successful completion of a specific task in the first DAG using ExternalTaskSensor.
+
+DAG 2 Modified: Using ExternalTaskSensor
+
+
+# Continues from the previous example's DAG 2 setup
+from airflow.sensors.external_task import ExternalTaskSensor
+
+with DAG('sales_report_generation',
+         default_args=default_args,
+         description='A DAG to generate sales reports',
+         schedule_interval=None,  # Triggered by another DAG
+         catchup=False) as dag:
+
+    wait_for_sales_processing = ExternalTaskSensor(
+        task_id='wait_for_sales_processing',
+        external_dag_id='sales_processing',
+        external_task_id='process_sales',
+        timeout=7200  # Timeout after 2 hours if the task hasn't succeeded
+    )
+
+    generate_report_task = PythonOperator(
+        task_id='generate_report',
+        python_callable=generate_report
+    )
+
+    wait_for_sales_processing >> generate_report_task
+
+
+These examples illustrate more realistic, functional Airflow DAG configurations for an e-commerce platform, where one DAG processes daily sales data and triggers another DAG to generate reports. 
+The TriggerDagRunOperator example directly initiates the second DAG upon completion of the first, whereas the ExternalTaskSensor example waits for successful completion of a specific task in the first DAG before starting. Both methods provide robust solutions for managing workflow dependencies in Airflow.
+
+
+1. Sales Processing DAG (sales_processing.py)
+This DAG processes sales data daily. It uses a PythonOperator to simulate the processing task and a TriggerDagRunOperator to trigger the report generation DAG upon completion.
+
+python
+
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.operators.dagrun_operator import TriggerDagRunOperator
+
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+    'start_date': datetime(2024, 1, 1),
+}
+
+def process_sales(**kwargs):
+    print("Sales data processed.")  # Replace with actual data processing logic
+
+with DAG('sales_processing',
+         default_args=default_args,
+         description='A DAG to process sales data',
+         schedule_interval=timedelta(days=1),
+         catchup=False) as dag:
+
+    process_sales_task = PythonOperator(
+        task_id='process_sales',
+        python_callable=process_sales
+    )
+
+    trigger_report_generation = TriggerDagRunOperator(
+        task_id='trigger_report_generation',
+        trigger_dag_id='sales_report_generation',
+    )
+
+    process_sales_task >> trigger_report_generation
+
+
+2. Sales Report Generation DAG (report_generation.py)
+This DAG generates sales reports. It is triggered by the completion of the sales processing DAG. It uses a PythonOperator to simulate the report generation task.
+
+
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+    'start_date': datetime(2024, 1, 1),
+}
+
+def generate_report(**kwargs):
+    print("Sales report generated.")  # Replace with actual report generation logic
+
+with DAG('sales_report_generation',
+         default_args=default_args,
+         description='A DAG to generate sales reports',
+         schedule_interval=None,  # This DAG is triggered by another DAG
+         catchup=False) as dag:
+
+    generate_report_task = PythonOperator(
+        task_id='generate_report',
+        python_callable=generate_report
+    )
+
+Testing in Google Cloud Composer
+To test these DAGs in Google Cloud Composer, follow these steps:
+
+Deploy the DAGs: Upload the sales_processing.py and report_generation.py files to the dags/ folder in your Composer environment's associated Cloud Storage bucket. 
+Composer automatically synchronizes this bucket with the Airflow environment.
+
+Access the Airflow Web UI: Use the Airflow web interface provided by Composer to monitor the DAGs. You can find the link to the Airflow web UI in the Composer environment's details in the Google Cloud Console.
+
+Trigger and Monitor:
+
+Manually trigger the sales_processing DAG using the Airflow web UI. Watch the logs to ensure the process_sales task completes and triggers the sales_report_generation DAG.
+Check the sales_report_generation DAG to verify it starts as expected after sales_processing finishes, and monitor the generate_report task logs.
+Debugging:
+
+If a DAG fails, use the logs available in the Airflow web UI to troubleshoot. Composer also integrates with Stackdriver Logging, allowing you to view logs directly in the Google Cloud Console.
+Adjust parameters, modify task definitions, and re-upload as needed.
+Validation:
+
+Validate the output of each task, ensuring that data processing and report generation align with expected results.
+Consider setting up email alerts or other notifications for task failures or successes to facilitate monitoring.
+By following these steps, you can effectively deploy, monitor, and debug your Airflow DAGs within Google Cloud Composer, ensuring they operate as intended for your e-commerce data workflows.
+
+
+Setting Up DAGs with Dependency in Airflow
+Let's use the two DAGs from our earlier example: sales_processing and sales_report_generation. The first DAG processes sales data and upon successful completion, it triggers the second DAG which generates reports.
+
+Step 1: Implementing the Trigger in the First DAG
+We can use the TriggerDagRunOperator to trigger another DAG. This operator allows you to specify the condition under which the second DAG should be triggered. The default behavior is to trigger upon successful completion of all tasks in the preceding DAG.
+
+Here's how you can set up the first DAG to trigger the second DAG:
+
+
+# File: dags/sales_processing.py
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.operators.dagrun_operator import TriggerDagRunOperator
+from datetime import datetime, timedelta
+
+def process_sales(ti):
+    # Simulate data processing
+    print("Sales data processed")
+    # Optionally pass data to XCom if needed for the next DAG
+    ti.xcom_push(key='sample_data', value={'example': 'data'})
+
+default_args = {
+    'owner': 'airflow',
+    'start_date': datetime(2024, 1, 1),
+    'email': ['your_email@example.com'],
+    'email_on_failure': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=1),
+}
+
+with DAG('sales_processing',
+         default_args=default_args,
+         schedule_interval='@daily',
+         catchup=False) as dag:
+
+    process_sales_task = PythonOperator(
+        task_id='process_sales',
+        python_callable=process_sales
+    )
+
+    trigger_report_generation = TriggerDagRunOperator(
+        task_id='trigger_sales_report_generation',
+        trigger_dag_id='sales_report_generation',
+    )
+
+    process_sales_task >> trigger_report_generation
+
+Step 2: Setting Up the Second DAG to Be Triggered
+The second DAG doesn’t need any special setup to be triggered; it will be triggered by the TriggerDagRunOperator from the first DAG.
+
+
+# File: dags/report_generation.py
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from datetime import datetime, timedelta
+
+def generate_report(ti):
+    # Retrieve data from XCom if needed
+    data = ti.xcom_pull(task_ids='process_sales', key='sample_data')
+    print(f"Generating report with data: {data}")
+
+default_args = {
+    'owner': 'airflow',
+    'start_date': datetime(2024, 1, 1),
+    'email': ['your_email@example.com'],
+    'email_on_failure': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=1),
+}
+
+with DAG('sales_report_generation',
+         default_args=default_args,
+         schedule_interval=None,  # Triggered by another DAG
+         catchup=False) as dag:
+
+    generate_report_task = PythonOperator(
+        task_id='generate_report',
+        python_callable=generate_report
+    )
+
+Step 3: Testing the Setup in Airflow
+Deploy both DAGs to your Airflow environment. If you're using Google Cloud Composer, upload these files to the Cloud Storage bucket linked to your Composer environment.
+
+Run the sales_processing DAG from the Airflow UI. After the process_sales task completes, the trigger_sales_report_generation task should automatically trigger the sales_report_generation DAG.
+
+Monitor the execution in the Airflow UI to ensure that the sales_report_generation DAG is triggered correctly and executes as expected.
+
+Check Logs for any errors and to confirm the data flow between tasks, especially if you're passing data via XCom.
+
+This setup effectively demonstrates how to automate workflows across multiple DAGs based on the success of preceding tasks or DAGs, allowing for complex orchestrations in Airflow.
+
+
+
+mplementing an event-driven Apache Airflow DAG in Google Cloud Composer to process files when they land in a Google Cloud Storage (GCS) bucket involves a few key components. This requires the use of GoogleCloudStoragePrefixSensor from Airflow's provider for Google to detect new files and a task to process and/or move these files to a new folder.
+
+Here's how you can set up such a system in Cloud Composer:
+
+Step 1: Define the DAG
+Create a DAG that periodically checks for new files in a specified GCS bucket. When new files are detected, tasks are triggered to process and move these files.
+
+python
+Copy code
+from airflow import DAG
+from datetime import datetime, timedelta
+from airflow.providers.google.cloud.operators.gcs import (
+    GCSDeleteObjectOperator,
+    GCSToGCSOperator
+)
+from airflow.providers.google.cloud.sensors.gcs import GoogleCloudStoragePrefixSensor
+
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+    'start_date': datetime(2024, 1, 1),
+}
+
+BUCKET_NAME = 'your-source-bucket-name'
+PREFIX = 'your-file-prefix'  # e.g., 'data/incoming/'
+NEW_FOLDER = 'processed/'  # Destination folder in the same bucket
+
+with DAG('gcs_file_transfer_dag',
+         default_args=default_args,
+         description='DAG to process files from GCS when they land in bucket',
+         schedule_interval=timedelta(minutes=5),  # Check every 5 minutes
+         catchup=False) as dag:
+
+    detect_new_file = GoogleCloudStoragePrefixSensor(
+        task_id='detect_new_file',
+        bucket=BUCKET_NAME,
+        prefix=PREFIX,
+        google_cloud_conn_id='google_cloud_default'
+    )
+
+    move_file = GCSToGCSOperator(
+        task_id='move_file',
+        source_bucket=BUCKET_NAME,
+        source_object=PREFIX + '{{ task_instance.xcom_pull(task_ids="detect_new_file") }}',
+        destination_bucket=BUCKET_NAME,
+        destination_object=NEW_FOLDER + '{{ task_instance.xcom_pull(task_ids="detect_new_file") }}',
+        move_object=True,
+        google_cloud_conn_id='google_cloud_default'
+    )
+
+    detect_new_file >> move_file
+Step 2: Configure the Sensor and Operators
+GoogleCloudStoragePrefixSensor: This sensor checks for the presence of files in a GCS bucket with a specified prefix. It polls the bucket at the interval defined by schedule_interval.
+GCSToGCSOperator: This operator is used to move the detected file to a new folder within the same bucket. It can also rename the file if needed.
+
+
