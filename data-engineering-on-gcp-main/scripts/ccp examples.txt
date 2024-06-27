@@ -1,3 +1,107 @@
+# Define default_args for the DAG
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'start_date': datetime(2023, 6, 1),
+    'email_on_failure': False,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+}
+
+# Updated check_date function for date range validation
+def check_date(**kwargs):
+    execution_date = kwargs['execution_date']
+    today = execution_date.day
+    current_month = execution_date.month
+    current_year = execution_date.year
+    last_day_of_month = calendar.monthrange(current_year, current_month)[1]
+    
+    # Check if today is between 24th and the last day of the current month or between 1st and 2nd of the next month
+    if 24 <= today <= last_day_of_month or 1 <= today <= 2:
+        print(f"Date {execution_date} is within range. Executing main tasks.")
+        return 'execute_tasks'
+    else:
+        print(f"Date {execution_date} is not within range. Skipping execution.")
+        return 'skip_tasks'
+
+# Define the DAG
+dag = DAG(
+    'conditional_monthly_dag',
+    default_args=default_args,
+    description='Run tasks only from the 24th to the 2nd of each month',
+    schedule_interval='0 13 * * *',  # Run daily at 1 PM BST
+    catchup=False,
+    tags=['example'],
+    timezone=pendulum.timezone('Europe/London'),  # Set timezone to BST
+)
+
+# Define the tasks
+with dag:
+    # Initial start task
+    start = EmptyOperator(
+        task_id='start',
+    )
+
+    # Branching task to check if the date is within the specified range
+    check_date_range = BranchPythonOperator(
+        task_id='check_date_range',
+        python_callable=check_date,
+        provide_context=True,
+    )
+
+    # Dummy task to represent the execution branch
+    execute_tasks = EmptyOperator(
+        task_id='execute_tasks',
+    )
+
+    # Dummy task to represent the skip branch
+    skip_tasks = EmptyOperator(
+        task_id='skip_tasks',
+    )
+
+start >> check_date_range  # Start task triggers the date check
+    check_date_range >> execute_tasks  >> moving_gfvfiles_job >> end  # Execute branch
+    check_date_range >> skip_tasks >> end  # Skip branch
++++
+
+
+from datetime import datetime
+import calendar
+
+def check_date(execution_date=None):
+    if execution_date is None:
+        execution_date = datetime.now()
+        
+    today = execution_date.day
+    current_month = execution_date.month
+    current_year = execution_date.year
+    last_day_of_month = calendar.monthrange(current_year, current_month)[1]
+    
+    # Check if today is between 24th and the last day of the current month or between 1st and 2nd of the next month
+    if 24 <= today <= last_day_of_month or 1 <= today <= 2:
+        print(f"Date {execution_date} is within range. Executing main tasks.")
+        return 'execute_tasks'
+    else:
+        print(f"Date {execution_date} is not within range. Skipping execution.")
+        return 'skip_tasks'
+
+# Example test scenarios
+test_dates = [
+    datetime(2023, 6, 23),  # Before the range
+    datetime(2023, 6, 24),  # Start of the range
+    datetime(2023, 6, 30),  # End of the month within range
+    datetime(2023, 7, 1),   # Within range
+    datetime(2023, 7, 2),   # Within range
+    datetime(2023, 7, 3),   # After the range
+]
+
+for test_date in test_dates:
+    result = check_date(test_date)
+    print(f"Test date: {test_date} -> Result: {result}")
+
+
+
 Use Case: Daily Sales Processing and Report Generation
 Method 1: Using TriggerDagRunOperator
 In this example, the first DAG processes daily sales data. Upon successful completion, it will trigger the second DAG which generates sales reports.
