@@ -1,0 +1,60 @@
+Google Cloud Composer Architecture
+
+Overview
+Google Cloud Composer is a fully managed workflow orchestration service built on Apache Airflow. It simplifies the process of managing, scheduling, and monitoring workflows. Here's a detailed look at the architecture of Google Cloud Composer:
+
+Core Components
+Google Cloud Composer Environment:
+
+This is the primary resource that users interact with. It consists of several managed components that together provide a fully functional Airflow setup.
+Airflow Scheduler:
+
+The scheduler is responsible for scheduling jobs. It parses the DAGs, determines their dependencies, and schedules tasks for execution.
+Airflow Web Server:
+
+The web server provides the user interface for Airflow. Users can access this UI to manage and monitor their workflows, view logs, and see task statuses.
+Airflow Workers:
+
+Workers are responsible for executing the tasks defined in the DAGs. They pick up tasks from the queue and run them.
+Airflow Metadata Database:
+
+This is a PostgreSQL database managed by Cloud Composer. It stores the state of the DAGs, task instances, and other metadata required by Airflow.
+Google Kubernetes Engine (GKE):
+
+Cloud Composer uses GKE to run the Airflow components. Each environment is essentially a Kubernetes cluster that hosts the Airflow web server, scheduler, and workers.
+Google Cloud Storage (GCS):
+
+GCS is used to store DAG files, logs, and other artifacts. Each Composer environment has a dedicated bucket where users can upload their DAG files.
+Google Cloud SQL:
+
+This service provides the managed PostgreSQL database for the Airflow metadata.
+Google Cloud Pub/Sub:
+
+Used for communication between different components, especially for task distribution and inter-component messaging.
+Identity and Access Management (IAM):
+
+IAM controls access to Composer environments and their components. It ensures that only authorized users and services can interact with the Composer resources.
+Data Flow
+User Interaction:
+
+Users define their workflows by writing DAGs in Python and upload these DAGs to the GCS bucket associated with their Composer environment.
+DAG Parsing:
+
+The Airflow scheduler continuously monitors the DAG folder in GCS. When a new DAG is detected, the scheduler parses it and schedules the tasks based on the defined schedule.
+Task Execution:
+
+The scheduler places the tasks in a queue. Airflow workers pick up tasks from this queue and execute them. The workers run in the GKE cluster managed by Composer.
+Logging and Monitoring:
+
+During execution, task logs are written to the GCS bucket. Users can view these logs through the Airflow UI.
+The status and metadata of each task execution are stored in the Cloud SQL database.
+Error Handling and Retries:
+
+If a task fails, Airflow’s built-in retry mechanism can reattempt the task based on the retry policy defined in the DAG. All retry attempts and errors are logged and can be monitored through the UI.
+High Availability and Scalability
+High Availability:
+
+Cloud Composer environments are designed for high availability. Components like the Airflow scheduler and workers run in multiple replicas within the GKE cluster to ensure redundancy.
+Scalability:
+
+Composer can scale horizontally by adding more worker nodes to the GKE cluster as the workload increases. This scaling can be manual or automatic, depending on the configuration.

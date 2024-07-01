@@ -1,0 +1,41 @@
+Now that you have a clear understanding of the Google Cloud Composer architecture, let's move on to practicing the shared programs. We will follow the steps outlined in the tutorial and execute the sample DAGs in a Cloud Composer environment.
+
+Step-by-Step Practice
+Set Up a Google Cloud Composer Environment:
+
+Go to the Google Cloud Console.
+Navigate to "Composer".
+Click "Create Environment".
+Configure the environment (name, location, machine type, etc.).
+Click "Create".
+Create and Upload a Simple DAG:
+
+Write a simple DAG as described in the earlier tutorial.
+Save the DAG file (example_dag.py) locally.
+Upload the DAG file to the dags folder in your Composer environment's GCS bucket.
+Access the Airflow UI:
+
+Go to the Cloud Composer environment details page in the Google Cloud Console.
+Click the "Airflow web UI" link to open the Airflow UI.
+Check if your DAG (example_dag) appears in the list.
+Trigger the DAG:
+
+In the Airflow UI, manually trigger the DAG to run immediately.
+Monitor the execution of the tasks.
+View logs and check task statuses.
+Advanced DAG Scheduling and Execution:
+
+Modify the DAG to include more tasks and different operators as outlined in the expanded tutorial.
+Test scheduling with different intervals and observe how tasks are executed based on the schedule.
+Monitoring and Troubleshooting:
+
+Use the Airflow UI to monitor DAG runs.
+View logs for successful and failed tasks.
+Check the status of task instances and understand how retries and failures are handled.
+By following these steps and utilizing the architecture knowledge, you'll be able to effectively test and orchestrate workflows using Google Cloud Composer.
+
+
+
+
+
+
