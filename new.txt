@@ -1103,6 +1103,33 @@ Using Airflow for dynamic external table creation and dbt for data transformatio
 
 
 
+from flask import Flask, request, jsonify
+import subprocess
+
+app = Flask(__name__)
+
+@app.route('/run-snapshot', defaults={'snapshot_name': None})
+@app.route('/run-snapshot/<snapshot_name>')
+def run_snapshot(snapshot_name):
+    # Build the dbt command based on whether a snapshot name is provided
+    if snapshot_name:
+        command = ['dbt', 'snapshot', '--select', snapshot_name]
+    else:
+        command = ['dbt', 'snapshot']
+    
+    try:
+        # Execute the dbt command
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        # Return the standard output if the command was successful
+        return jsonify(status='success', output=result.stdout)
+    except subprocess.CalledProcessError as e:
+        # Return the standard error if the command failed
+        return jsonify(status='error', output=e.stderr), 500
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+
 
 
 
