@@ -1,3 +1,25 @@
+-- tests/unique_combination_of_columns.sql
+{% test unique_combination_of_columns(model, column_list) %}
+    WITH grouped AS (
+        SELECT
+            {{ column_list }},
+            COUNT(*) as count
+        FROM {{ model }}
+        GROUP BY {{ column_list }}
+        HAVING COUNT(*) > 1
+    )
+    SELECT * FROM grouped
+{% endtest %}
+
+version: 2
+
+models:
+  - name: your_table_name
+    tests:
+      - unique_combination_of_columns:
+          column_list: "new, new2, new3"
+
+
 Data Build Tool (DBT) is a powerful tool for transforming data in your data warehouse through SQL. When using DBT for testing solutions, especially for stage tables to incremental loads which can include snapshots and incremental tables, there are several strategies you can employ:
 
 1. Testing Stage Tables
