@@ -2199,7 +2199,105 @@ VALUES
 
 
 
+++++
 
+
+To adapt the macro for identifying duplicates and use it as a DBT test, you need to follow a few steps. DBT tests can be custom or generic. We'll create a custom test that utilizes your macro to identify duplicates.
+
+Step 1: Define the Macro
+First, ensure your macro for identifying duplicates is defined in the macros directory. Let's call it identify_duplicates.sql:
+
+sql
+Copy code
+-- macros/identify_duplicates.sql
+
+{% macro identify_duplicates(table_name, unique_columns) %}
+with duplicates as (
+    select
+        {{ unique_columns | join(', ') }},
+        count(*) as record_count
+    from {{ table_name }}
+    group by {{ unique_columns | join(', ') }}
+    having count(*) > 1
+)
+select * from duplicates
+{% endmacro %}
+Step 2: Create a Custom Test
+Next, create a custom test that uses this macro. Place the custom test SQL file in the tests directory. Let's call it test_no_duplicates.sql:
+
+sql
+Copy code
+-- tests/test_no_duplicates.sql
+
+{% test test_no_duplicates(model, columns) %}
+    with duplicate_check as (
+        {{ identify_duplicates(model, columns) }}
+    )
+    select
+        count(*) as num_duplicates
+    from duplicate_check
+    having num_duplicates > 0
+{% endtest %}
+Step 3: Define the Test in schema.yml
+Now, you need to define the test in your schema.yml file where the model is defined. Here's an example:
+
+yaml
+Copy code
+version: 2
+
+models:
+  - name: your_model_name
+    description: "Description of your model"
+    columns:
+      - name: id
+        description: "Primary key"
+        tests:
+          - not_null
+          - unique
+          - test_no_duplicates:
+              columns: ['id']
+In the above example, replace your_model_name with the actual name of your model. The columns parameter in test_no_duplicates should list the columns you want to check for duplicates.
+
+Example Usage
+Suppose you have a model named orders and you want to ensure that there are no duplicate order_id and customer_id combinations. Your schema.yml would look something like this:
+
+yaml
+Copy code
+version: 2
+
+models:
+  - name: orders
+    description: "This table contains order data."
+    columns:
+      - name: order_id
+        description: "Unique identifier for each order."
+        tests:
+          - not_null
+      - name: customer_id
+        description: "Unique identifier for each customer."
+        tests:
+          - not_null
+      - name: order_date
+        description: "The date when the order was placed."
+      - name: order_amount
+        description: "The total amount for the order."
+    tests:
+      - test_no_duplicates:
+          columns: ['order_id', 'customer_id']
+Running the Tests
+Run the DBT tests using the following command:
+
+sh
+Copy code
+dbt test
+This will execute all the tests defined in your schema.yml, including the custom test for identifying duplicates.
+
+Summary
+Macro Definition: Ensure your macro for identifying duplicates is defined correctly.
+Custom Test: Create a custom test that leverages the macro.
+Schema Definition: Add the custom test to your schema.yml file.
+Run Tests: Execute the DBT tests using dbt test.
+By following these steps, you can effectively use your duplicate identification macro as a DBT test to ensure data quality.
 
 
 
