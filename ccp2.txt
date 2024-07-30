@@ -1,3 +1,35 @@
+CREATE TABLE your_project_id.your_dataset.audit_log (
+    id INT64 NOT NULL,
+    folder_date DATE,
+    delta_action STRING,
+    table_name STRING,
+    timestamp TIMESTAMP,
+    PRIMARY KEY (id)
+);
+
+{% macro log_audit(stage_tables) %}
+    {% for table in stage_tables %}
+        INSERT INTO `{{ var('project_id') }}.{{ var('dataset') }}.audit_log` (id, fol_date, new_action, table_name, timestamp)
+        SELECT
+            CAST(FLOOR(RAND() * 1000000) AS INT64),
+            fol_date,
+            new_action,
+            '{{ table }}',
+            CURRENT_TIMESTAMP()
+        FROM `{{ var('project_id') }}.{{ var('dataset') }}.{{ table }}`
+        LIMIT 1;
+    {% endfor %}
+{% endmacro %}
+
+
+{% set stage_tables = ['stage_table_1', 'stage_table_2', 'stage_table_3'] %}
+
+-- Insert audit log entries for all stage tables
+{% call log_audit(stage_tables) %}
+{% endcall %}
+
+
+
 -- tests/unique_combination_of_columns.sql
 {% test unique_combination_of_columns(model, column_list) %}
     WITH grouped AS (
