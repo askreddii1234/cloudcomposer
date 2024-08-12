@@ -1,3 +1,129 @@
+from flask import Flask, request, jsonify, send_file
+from google.cloud import storage
+from datetime import datetime
+import os
+
+app = Flask(__name__)
+
+
+
+def get_bucket_and_client(env):
+    """ Helper function to retrieve the GCS client and bucket based on environment. """
+    config = PROJECTS.get(env.lower())
+    if not config:
+        raise ValueError('Invalid environment specified')
+    client = storage.Client(project=config['project_id'])
+    bucket = client.bucket(config['bucket_name'])
+    return client, bucket
+
+@app.route('/view_report', methods=['GET'])
+def view_report():
+    try:
+        env = request.args.get('env')
+        report_type = request.args.get('report_type')
+        date_str = request.args.get('date')
+        file_index = request.args.get('file_index', type=int)
+
+        if not env or not report_type or not date_str:
+            return jsonify({'error': 'Missing required parameters'}), 400
+
+        date = datetime.strptime(date_str, '%d-%m-%Y')
+        formatted_date = date.strftime('%Y-%m-%d')
+
+        client, bucket = get_bucket_and_client(env)
+
+        # Prefix to search within a specific folder in the bucket
+        prefix = f"{report_type}/reports/{formatted_date}/"
+        blobs = list(bucket.list_blobs(prefix=prefix))
+        if not blobs:
+            return jsonify({'error': 'No reports found for the specified date'}), 404
+
+        # If no specific file index is given, return a list of files
+        if file_index is None:
+            files = [{'name': blob.name, 'updated': blob.updated} for blob in blobs]
+            return jsonify({'files': files}), 200
+
+        # If a file index is provided, fetch that specific file
+        if file_index < 0 or file_index >= len(blobs):
+            return jsonify({'error': 'File index out of range'}), 400
+        selected_blob = blobs[file_index]
+
+        # Download the file to a temporary location and send it
+        temp_file_path = f"temp_{formatted_date}_{report_type}_{file_index}.csv"
+        selected_blob.download_to_filename(temp_file_path)
+        response = send_file(temp_file_path, as_attachment=True)
+        os.remove(temp_file_path)
+        return response
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'An error occurred: {str(e)}'}), 500
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+
+
+
+from flask import Flask, request, jsonify, send_file
+from google.cloud import storage
+from datetime import datetime
+import os
+
+app = Flask(__name__)
+
+
+@app.route('/view_report', methods=['GET'])
+def view_report():
+    try:
+        # Extract query parameters
+        env = request.args.get('env')
+        report_type = request.args.get('report_type')  # 'CMS' or 'FMO'
+        date_str = request.args.get('date')  # 'DD-MM-YYYY'
+
+        if not env or not report_type or not date_str:
+            return jsonify({'error': 'Missing required parameters'}), 400
+
+        # Convert date string to datetime object to validate and format it for filename
+        date = datetime.strptime(date_str, '%d-%m-%Y')
+        formatted_date = date.strftime('%Y-%m-%d')  # Format date as needed for the filename
+
+        # Get the configuration for the specified environment
+        if env.lower() not in PROJECTS:
+            return jsonify({'error': 'Invalid environment specified'}), 400
+        config = PROJECTS[env.lower()]
+        
+        # Set up GCS client
+        client = storage.Client(project=config['project_id'])
+        bucket = client.bucket(config['bucket_name'])
+
+        # Construct the file path
+        file_path = f"{report_type}/reports/{formatted_date}/report.csv"
+
+        # Attempt to get the blob from the bucket
+        blob = bucket.blob(file_path)
+        if not blob.exists():
+            return jsonify({'error': 'Report not found for the specified date'}), 404
+        
+        # Download the file to a temporary location
+        temp_file_path = f"temp_{formatted_date}_{report_type}.csv"
+        blob.download_to_filename(temp_file_path)
+
+        # Send the file to the user
+        response = send_file(temp_file_path, as_attachment=True)
+        os.remove(temp_file_path)  # Clean up the temporary file
+        return response
+    except ValueError:
+        return jsonify({'error': 'Invalid date format. Please use DD-MM-YYYY'}), 400
+    except Exception as e:
+        return jsonify({'error': f'An error occurred: {str(e)}'}), 500
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+
+
+
 version: 2
 
 sources:
