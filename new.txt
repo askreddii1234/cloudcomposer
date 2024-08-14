@@ -4,26 +4,18 @@ import re
 import os
 from datetime import datetime, timedelta
 from google.cloud import storage
+import logging
 
 app = Flask(__name__)
 
 # Environment-specific configurations
 PROJECTS = {
     'bld': {
-        'project_id': 'your-bld-project-id',
-        'bucket_name': 'your-bld-bucket-name',
-        'target_bucket': 'your-bld-target-bucket-name'  # Static target bucket for BLD environment
+        'project_id': 'extractly-421810',
+        'bucket_name': 'extractly-421810',
+        'target_bucket': 'audiosmith'  # Static target bucket for BLD environment
     },
-    'int': {
-        'project_id': 'your-int-project-id',
-        'bucket_name': 'your-int-bucket-name',
-        'target_bucket': 'your-int-target-bucket-name'  # Static target bucket for INT environment
-    },
-    'preprod': {
-        'project_id': 'your-preprod-project-id',
-        'bucket_name': 'your-preprod-bucket-name',
-        'target_bucket': 'your-preprod-target-bucket-name'  # Static target bucket for PREPROD environment
-    }
+    # Add other environments as needed...
 }
 
 def list_blobs(project_id, bucket_name, prefix):
@@ -31,20 +23,8 @@ def list_blobs(project_id, bucket_name, prefix):
     bucket = client.bucket(bucket_name)
     return bucket.list_blobs(prefix=prefix)
 
-def upload_to_gcs(bucket_name, source_file_name, destination_blob_name):
-    """Uploads a file to the specified GCS bucket."""
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(destination_blob_name)
-    
-    if not os.path.isfile(source_file_name):
-        raise FileNotFoundError(f"File not found: {source_file_name}")
-    
-    blob.upload_from_filename(source_file_name)
-    return f"File '{destination_blob_name}' uploaded successfully to bucket '{bucket_name}'."
-
-@app.route('/generate_dashboard/<source>/<env>', methods=['GET'])
-def generate_dashboard(source, env):
+@app.route('/generate_dashboard/<source_type>/<env>', methods=['GET'])
+def generate_dashboard(source_type, env):
     try:
         # Retrieve start_date and end_date from query parameters
         start_date_str = request.args.get('start_date')
@@ -66,27 +46,25 @@ def generate_dashboard(source, env):
         if (today - start_date).days > 30:
             return jsonify({'error': 'Date should be within the last 30 days from today.'}), 400
 
-        if source not in ['fmo', 'cms']:
-            return jsonify({'error': 'Invalid source specified. Please use "fmo" or "cms".'}), 400
-
         env_config = PROJECTS.get(env)
         if not env_config:
             return jsonify({'error': 'Invalid environment specified.'}), 400
 
         target_bucket = env_config['target_bucket']
 
-        if source == 'fmo':
-            static_file = 'static_table_list_f.csv'
-            prefix = ''
-            pattern = r'(?P<table>TRANSPORT-DATA-FMO_[^/]+)/RECEIVED/(?P<date>\d{4}-\d{2}-\d{2})/'
-        elif source == 'cms':
+        if source_type == 'fmo':
+            static_file = 'static_table_list_fmo.csv'
+            prefix = 'EXTERNAL/MFVS/SOLIFI/BDM/FMO/'
+            pattern = r'EXTERNAL/MFVS/SOLIFI/BDM/FMO/(?P<table>TRANSPORT-DATA-FMO_[^/]+)/RECEIVED/(?P<date>\d{4}-\d{2}-\d{2})/(?P<file_name>.+)'
+        elif source_type == 'cms':
             static_file = 'static_table_list_cms.csv'
-            prefix = ''
-            pattern = r'(?P<table>TRANSPORT-DATA-CMS_[^/]+)/RECEIVED/(?P<date>\d{4}-\d{2}-\d{2})/'
+            prefix = 'EXTERNAL/MFVS/SOLIFI/BDM/CMS/'
+            pattern = r'EXTERNAL/MFVS/SOLIFI/BDM/CMS/(?P<table>TRANSPORT-DATA-CMS_[^/]+)/RECEIVED/(?P<date>\d{4}-\d{2}-\d{2})/(?P<file_name>.+)'
 
         static_table_list = pd.read_csv(static_file)
         all_tables = set(static_table_list['Table Name'])
 
+        # List blobs from GCS
         blobs = list_blobs(env_config['project_id'], env_config['bucket_name'], prefix)
 
         if not blobs:
@@ -95,65 +73,42 @@ def generate_dashboard(source, env):
         # Adjust the date range to ensure there's always at least one column in the DataFrame
         date_range = pd.date_range(start=start_date, end=end_date)
         if len(date_range) == 1:
-            date_range = pd.date_range(start=start_date, periods=1)  # Adjust to ensure single day displays properly
+            date_range = pd.date_range(start=start_date, periods=1)
 
         status_last_5_days = pd.DataFrame(index=static_table_list['Table Name'], columns=date_range, data=0)
-        audit_report = []
-
-        found_tables = set()
 
         file_pattern = re.compile(pattern)
         
         for blob in blobs:
+            logging.debug(f"Processing blob: {blob.name}")
             match = file_pattern.match(blob.name)
             if match:
-                table_name = match.group('table').replace("TRANSPORT-DATA-FMO_", "").replace("TRANSPORT-DATA-CMS_", "")
-                found_tables.add(table_name)
+                logging.debug(f"Blob matched: {blob.name}")
+                table_name = match.group('table').replace("TRANSPORT-DATA-FMO_", "").replace("TRANSPORT-DATA-CMS_", "").strip()
                 date_received = datetime.strptime(match.group('date'), '%Y-%m-%d')
+                
+                if table_name in status_last_5_days.index:
+                    if start_date <= date_received <= end_date:
+                        status_last_5_days.at[table_name, date_received] += 1
+                else:
+                    logging.debug(f"Table name {table_name} not found in static list.")
+            else:
+                logging.error(f"Regex did not match for blob: {blob.name}")
 
-                if start_date <= date_received <= end_date:
-                    status_last_5_days.at[table_name, date_received] += 1
-                    audit_report.append({
-                        'Table Name': table_name,
-                        'Date Received': date_received.strftime('%Y-%m-%d'),
-                        'File Path': blob.name,
-                        'Status': 'Found'
-                    })
+        # Save the dashboard report to a CSV file
+        dashboard_report_path = f'/tmp/{source_type}_dashboard_report_{datetime.now().strftime("%Y%m%d%H%M%S")}.csv'
+        status_last_5_days.to_csv(dashboard_report_path, index=True)
 
-        # Identify missing tables and add to the audit report
-        missing_tables = all_tables - found_tables
-        missing_table_report = []
-        for table_name in missing_tables:
-            for date in date_range:
-                missing_table_report.append({
-                    'Table Name': table_name,
-                    'Date Expected': date.strftime('%Y-%m-%d'),
-                    'Status': 'Missing'
-                })
-
-        # Save the audit report to a CSV file
-        audit_report_df = pd.DataFrame(audit_report + missing_table_report)
-        audit_report_path = f'/tmp/{source}_audit_report_{datetime.now().strftime("%Y%m%d%H%M%S")}.csv'
-        audit_report_df.to_csv(audit_report_path, index=False)
-
-        # Upload the audit report to the specified GCS bucket
-        audit_gcs_path = f'reports/{source}/{os.path.basename(audit_report_path)}'
-        upload_to_gcs(target_bucket, audit_report_path, audit_gcs_path)
+        # Upload the dashboard report to the specified GCS bucket
+        dashboard_gcs_path = f'dashboards/{source_type}/{os.path.basename(dashboard_report_path)}'
+        #upload_to_gcs(target_bucket, dashboard_report_path, dashboard_gcs_path)
 
         # Convert the DataFrame for found tables to an HTML table with styling
         found_table_html = (
             status_last_5_days.style
-            .applymap(lambda x: 'background-color: lightgreen' if x > 0 else '', subset=pd.IndexSlice[:, :])
-            .set_table_attributes('class="table table-striped table-bordered"')
-            .to_html()
-        )
-
-        # Convert the missing tables report to a DataFrame and then to HTML
-        missing_table_df = pd.DataFrame(missing_table_report)
-        missing_table_html = (
-            missing_table_df.style
-            .set_table_attributes('class="table table-striped table-bordered"')
-            .set_properties(**{'background-color': '#f8d7da', 'color': 'black'})
+            .applymap(lambda x: 'background-color: lightgreen' if x > 0 else 'background-color: lightcoral', subset=pd.IndexSlice[:, :])
+            .set_table_attributes('class="table table-hover table-bordered table-responsive-sm"')
+            .set_properties(**{'text-align': 'center'})
             .to_html()
         )
 
@@ -161,7 +116,7 @@ def generate_dashboard(source, env):
         return render_template_string("""
             <html>
                 <head>
-                    <title>{{ source.upper() }} Data Dashboard</title>
+                    <title>{{ source_type.upper() }} Data Dashboard</title>
                     <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0/css/bootstrap.min.css">
                     <style>
                         body {
@@ -175,27 +130,27 @@ def generate_dashboard(source, env):
                         .table-container {
                             margin-top: 30px;
                         }
+                        .table-responsive {
+                            background-color: white;
+                            padding: 20px;
+                            border-radius: 5px;
+                            box-shadow: 0px 0px 15px rgba(0, 0, 0, 0.1);
+                        }
                     </style>
                 </head>
                 <body>
                     <div class="container">
-                        <h2>{{ source.upper() }} Data Dashboard for {{ env.upper() }} ({{ start_date_str }} to {{ end_date_str }})</h2>
+                        <h2>{{ source_type.upper() }} Data Dashboard -: {{ env.upper() }} ({{ start_date_str }} to {{ end_date_str }})</h2>
                         <div class="table-container">
-                            <h3>Found Tables</h3>
+                            <h3>Table Data Counts</h3>
                             <div class="table-responsive">
                                 {{ found_table_html | safe }}
-                            </div>
-                        </div>
-                        <div class="table-container">
-                            <h3>Missing Tables</h3>
-                            <div class="table-responsive">
-                                {{ missing_table_html | safe }}
                             </div>
                         </div>
                     </div>
                 </body>
             </html>
-        """, source=source, env=env, start_date_str=start_date_str, end_date_str=end_date_str, found_table_html=found_table_html, missing_table_html=missing_table_html)
+        """, source_type=source_type, env=env, start_date_str=start_date_str, end_date_str=end_date_str, found_table_html=found_table_html)
 
     except ValueError as e:
         return jsonify({'error': f'Date format error: {str(e)}. Please ensure the dates are in DD-MM-YYYY format.'}), 400
@@ -203,4 +158,4 @@ def generate_dashboard(source, env):
         return jsonify({'error': f'Error: {str(e)}'}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug
+    app.run(host='0.0.0.0', port=8080, debug=True)
