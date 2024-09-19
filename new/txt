@@ -1,0 +1,24 @@
+def calculate_last_refresh_date_across_folders(blobs):
+    latest_creation_timestamp = None
+
+    # Iterate over all blobs (files) retrieved from GCS
+    for blob in blobs:
+        file_name = blob.name
+
+        # Only consider JSON files
+        if file_name.endswith('.json'):
+            # Extract the file creation timestamp
+            file_creation_timestamp = blob.time_created  # Use 'time_created' to get the file creation time
+
+            # Update the latest creation timestamp if this file is more recent
+            if latest_creation_timestamp is None or file_creation_timestamp > latest_creation_timestamp:
+                latest_creation_timestamp = file_creation_timestamp
+
+    # Return the latest creation timestamp as the last refresh date
+    return latest_creation_timestamp
+
+
+
+        # Calculate last refresh date based on file creation dates
+        last_refresh_date = calculate_last_refresh_date_across_folders(blobs)
+        last_refresh_display = last_refresh_date.strftime('%Y-%m-%d %H:%M:%S %Z') if last_refresh_date else 'No Data Found'
