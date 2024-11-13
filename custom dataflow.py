@@ -484,6 +484,99 @@ if __name__ == "__main__":
     spanner_to_bigquery()
 
 
+
+++++
+
+
+from google.cloud import spanner
+from google.cloud import bigquery
+import json  # To handle JSON fields in Spanner
+from datetime import datetime
+
+# Configuration
+PROJECT_ID = "your-project-id"
+INSTANCE_ID = "your-instance-id"
+DATABASE_ID = "your-database-id"
+TABLE_NAME = "your-spanner-table"
+BQ_DATASET = "your-bq-dataset"
+BQ_TABLE = "your-bq-table"
+
+def spanner_to_bigquery():
+    # Initialize Spanner client
+    spanner_client = spanner.Client(project=PROJECT_ID)
+    instance = spanner_client.instance(INSTANCE_ID)
+    database = instance.database(DATABASE_ID)
+
+    # Initialize BigQuery client
+    bq_client = bigquery.Client(project=PROJECT_ID)
+
+    # Query the Spanner table
+    query = f"SELECT * FROM {TABLE_NAME}"
+    with database.snapshot() as snapshot:
+        result_set = snapshot.execute_sql(query)
+        rows = list(result_set)  # Fetch all rows
+        if not rows:
+            print(f"No data found in Spanner table {TABLE_NAME}.")
+            return
+
+        # Extract column names and types dynamically
+        fields = result_set.metadata.row_type.fields
+        bq_schema = []
+        for field in fields:
+            spanner_type = field.type_.code.name  # Spanner type (e.g., STRING, INT64, JSON)
+            bq_type = map_spanner_to_bigquery(spanner_type)
+            bq_schema.append(bigquery.SchemaField(field.name, bq_type))
+
+        # Create BigQuery table dynamically
+        table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
+        table = bigquery.Table(table_id, schema=bq_schema)
+        table = bq_client.create_table(table, exists_ok=True)  # Create table if it doesn't exist
+        print(f"BigQuery table {BQ_TABLE} created successfully with schema: {bq_schema}")
+
+        # Prepare rows to insert
+        rows_to_insert = [
+            {
+                fields[i].name: handle_field_value(fields[i].type_.code.name, value)
+                for i, value in enumerate(row)
+            }
+            for row in rows
+        ]
+
+        # Insert rows into BigQuery table
+        errors = bq_client.insert_rows_json(table_id, rows_to_insert)
+        if errors:
+            print(f"Errors occurred while inserting rows: {errors}")
+        else:
+            print(f"Data loaded successfully into BigQuery table {BQ_TABLE}.")
+
+def handle_field_value(field_type, value):
+    """Handles Spanner field values for insertion into BigQuery."""
+    if field_type == "JSON" and value is not None:
+        return json.dumps(value)  # Serialize JSON fields
+    elif field_type == "TIMESTAMP" and value is not None:
+        return value.isoformat()  # Convert DatetimeWithNanoseconds to ISO 8601 string
+    else:
+        return value  # Return value as-is for other types
+
+def map_spanner_to_bigquery(spanner_type):
+    """Maps Spanner types to BigQuery types, including JSON support."""
+    spanner_to_bq = {
+        "STRING": "STRING",
+        "INT64": "INTEGER",
+        "FLOAT64": "FLOAT",
+        "BOOL": "BOOLEAN",
+        "DATE": "DATE",
+        "TIMESTAMP": "TIMESTAMP",
+        "BYTES": "BYTES",
+        "JSON": "JSON",  # Map Spanner JSON to BigQuery JSON
+    }
+    return spanner_to_bq.get(spanner_type, "STRING")  # Default to STRING for unknown types
+
+if __name__ == "__main__":
+    spanner_to_bigquery()
+
+
+
                      
 
                      
