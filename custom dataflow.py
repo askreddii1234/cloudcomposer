@@ -575,6 +575,144 @@ def map_spanner_to_bigquery(spanner_type):
 if __name__ == "__main__":
     spanner_to_bigquery()
 
++++++++++++++++++++++++++++++++++++++
+
+
+import apache_beam as beam
+from apache_beam.options.pipeline_options import PipelineOptions, GoogleCloudOptions
+from apache_beam.io.gcp.experimental.spannerio import ReadFromSpanner
+from apache_beam.io.gcp.bigquery import WriteToBigQuery
+import datetime
+import uuid
+import json
+
+
+class CustomPipelineOptions(PipelineOptions):
+    """Custom pipeline options to pass additional arguments."""
+    @classmethod
+    def _add_argparse_args(cls, parser):
+        parser.add_argument("--project", required=True, help="GCP Project ID")
+        parser.add_argument("--instance_id", required=True, help="Spanner Instance ID")
+        parser.add_argument("--database_id", required=True, help="Spanner Database ID")
+        parser.add_argument("--table_name", required=True, help="Spanner Table Name")
+        parser.add_argument("--bq_dataset", required=True, help="BigQuery Dataset Name")
+        parser.add_argument("--bq_table", required=True, help="BigQuery Table Name")
+        parser.add_argument("--temp_location", required=True, help="GCS Temp Location")
+        parser.add_argument("--staging_location", required=True, help="GCS Staging Location")
+        parser.add_argument("--region", required=True, help="GCP Region")
+        parser.add_argument("--service_account_email", required=True, help="Service Account Email")
+        parser.add_argument("--dataflow_kms_key", required=True, help="KMS Key for encryption")
+        parser.add_argument("--sdk_container_image", required=True, help="Custom SDK container image")
+        parser.add_argument("--subnetwork", required=True, help="Subnetwork for Dataflow workers")
+        parser.add_argument("--num_workers", type=int, required=True, help="Number of workers")
+        parser.add_argument("--max_num_workers", type=int, required=True, help="Max number of workers")
+        parser.add_argument("--autoscaling_algorithm", required=True, help="Autoscaling algorithm")
+        parser.add_argument("--use_public_ips", type=bool, default=False, help="Whether to use public IPs")
+
+
+class MapSpannerToBigQuery(beam.DoFn):
+    """Custom DoFn to map Spanner data to BigQuery format."""
+    def __init__(self, spanner_fields):
+        self.spanner_fields = spanner_fields
+
+    def process(self, row):
+        """Process each row to map Spanner fields to BigQuery schema."""
+        result = {}
+        for idx, field in enumerate(self.spanner_fields):
+            value = row[idx]
+            if field.type_.code.name == "JSON" and value is not None:
+                result[field.name] = json.dumps(value)  # Serialize JSON to string
+            elif field.type_.code.name == "TIMESTAMP" and value is not None:
+                result[field.name] = value.isoformat()  # Format timestamp to ISO 8601
+            else:
+                result[field.name] = value  # Keep other types as-is
+        yield result
+
+
+def map_spanner_to_bigquery_schema(spanner_fields):
+    """Maps Spanner schema fields to BigQuery schema."""
+    spanner_to_bq_type = {
+        "STRING": "STRING",
+        "INT64": "INTEGER",
+        "FLOAT64": "FLOAT",
+        "BOOL": "BOOLEAN",
+        "DATE": "DATE",
+        "TIMESTAMP": "TIMESTAMP",
+        "BYTES": "BYTES",
+        "JSON": "JSON",
+    }
+    return [
+        {"name": field.name, "type": spanner_to_bq_type[field.type_.code.name]}
+        for field in spanner_fields
+    ]
+
+
+def run(argv=None):
+    pipeline_options = CustomPipelineOptions(argv)
+    google_cloud_options = pipeline_options.view_as(GoogleCloudOptions)
+
+    # Extract pipeline parameters
+    project = google_cloud_options.project
+    instance_id = pipeline_options.instance_id
+    database_id = pipeline_options.database_id
+    table_name = pipeline_options.table_name
+    bq_dataset = pipeline_options.bq_dataset
+    bq_table = pipeline_options.bq_table
+    region = pipeline_options.region
+    temp_location = pipeline_options.temp_location
+    staging_location = pipeline_options.staging_location
+    service_account_email = pipeline_options.service_account_email
+    dataflow_kms_key = pipeline_options.dataflow_kms_key
+    sdk_container_image = pipeline_options.sdk_container_image
+    subnetwork = pipeline_options.subnetwork
+    num_workers = pipeline_options.num_workers
+    max_num_workers = pipeline_options.max_num_workers
+    autoscaling_algorithm = pipeline_options.autoscaling_algorithm
+    use_public_ips = pipeline_options.use_public_ips
+
+    # Define the job name dynamically
+    job_name = f"dataflow-job-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:5]}"
+
+    # Update pipeline options
+    google_cloud_options.job_name = job_name
+    google_cloud_options.temp_location = temp_location
+    google_cloud_options.staging_location = staging_location
+    google_cloud_options.region = region
+    google_cloud_options.service_account_email = service_account_email
+    google_cloud_options.sdk_container_image = sdk_container_image
+    google_cloud_options.subnetwork = subnetwork
+
+    # Create BigQuery table name
+    bq_table_full = f"{project}:{bq_dataset}.{bq_table}"
+
+    # Apache Beam pipeline
+    with beam.Pipeline(options=pipeline_options) as pipeline:
+        # Query Spanner table
+        query = f"SELECT * FROM {table_name}"
+        rows = (
+            pipeline
+            | "ReadFromSpanner" >> ReadFromSpanner(
+                project_id=project,
+                instance_id=instance_id,
+                database_id=database_id,
+                sql=query,
+            )
+        )
+
+        # Map Spanner rows to BigQuery rows
+        mapped_rows = rows | "MapSpannerToBigQuery" >> beam.ParDo(MapSpannerToBigQuery([]))  # Add schema
+
+        # Write to BigQuery
+        mapped_rows | "WriteToBigQuery" >> WriteToBigQuery(
+            table=bq_table_full,
+            schema="SCHEMA_AUTODETECT",  # Automatically detect schema
+            write_disposition=beam.io.BigQueryDisposition.WRITE_APPEND,
+            create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED,
+        )
+
+
+if __name__ == "__main__":
+    run()
 
 
                      
