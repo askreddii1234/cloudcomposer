@@ -715,9 +715,285 @@ if __name__ == "__main__":
     run()
 
 
-                     
+                     +
 
-                     
+config.json
+
+{
+  "environments": {
+    "dev": {
+      "SPANNER_INSTANCE_ID": "dev-spanner-instance-id",
+      "SPANNER_DATABASE_ID": "dev-spanner-database-id",
+      "SPANNER_TABLE_ID": "dev-spanner-table-id",
+      "BIGQUERY_PROJECT_ID": "dev-bigquery-project-id",
+      "BIGQUERY_DATASET_ID": "dev-dataset-id",
+      "BIGQUERY_TABLE_ID": "dev-table-id"
+    },
+    "staging": {
+      "SPANNER_INSTANCE_ID": "staging-spanner-instance-id",
+      "SPANNER_DATABASE_ID": "staging-spanner-database-id",
+      "SPANNER_TABLE_ID": "staging-spanner-table-id",
+      "BIGQUERY_PROJECT_ID": "staging-bigquery-project-id",
+      "BIGQUERY_DATASET_ID": "staging-dataset-id",
+      "BIGQUERY_TABLE_ID": "staging-table-id"
+    },
+    "prod": {
+      "SPANNER_INSTANCE_ID": "prod-spanner-instance-id",
+      "SPANNER_DATABASE_ID": "prod-spanner-database-id",
+      "SPANNER_TABLE_ID": "prod-spanner-table-id",
+      "BIGQUERY_PROJECT_ID": "prod-bigquery-project-id",
+      "BIGQUERY_DATASET_ID": "prod-dataset-id",
+      "BIGQUERY_TABLE_ID": "prod-table-id"
+    }
+  }
+}
+
+
+
+from google.cloud import spanner
+from google.cloud import bigquery
+from google.api_core import retry
+import logging
+import os
+import json
+
+# Load Configuration from File
+def load_config(env):
+    with open("config.json", "r") as config_file:
+        config = json.load(config_file)
+        if env not in config["environments"]:
+            raise ValueError(f"Environment '{env}' not found in configuration file.")
+        return config["environments"][env]
+
+# Set Environment
+ENV = os.getenv("ENV", "dev")  # Default to 'dev' if ENV is not set
+CONFIG = load_config(ENV)
+
+# Initialize Clients
+spanner_client = spanner.Client()
+bigquery_client = bigquery.Client(project=CONFIG["BIGQUERY_PROJECT_ID"])
+
+# Check Connectivity to BigQuery
+def check_bigquery_connectivity():
+    try:
+        datasets = list(bigquery_client.list_datasets())  # Fetch all datasets in the project
+        if datasets:
+            print(f"BigQuery connectivity successful. Found {len(datasets)} datasets.")
+        else:
+            print("BigQuery connectivity successful but no datasets found.")
+    except Exception as e:
+        logging.error(f"BigQuery connectivity failed: {e}", exc_info=True)
+
+# Check Connectivity to Spanner
+def check_spanner_connectivity():
+    try:
+        instance = spanner_client.instance(CONFIG["SPANNER_INSTANCE_ID"])
+        database = instance.database(CONFIG["SPANNER_DATABASE_ID"])
+        with database.snapshot() as snapshot:
+            query = "SELECT 1"  # Simple query to validate connection
+            result = list(snapshot.execute_sql(query))
+            if result:
+                print("Spanner connectivity successful.")
+    except Exception as e:
+        logging.error(f"Spanner connectivity failed: {e}", exc_info=True)
+
+# Truncate a BigQuery Table
+def truncate_bigquery_table():
+    try:
+        table_id = f"{CONFIG['BIGQUERY_PROJECT_ID']}.{CONFIG['BIGQUERY_DATASET_ID']}.{CONFIG['BIGQUERY_TABLE_ID']}"
+        query = f"TRUNCATE TABLE `{table_id}`"  # BigQuery SQL to truncate table
+        query_job = bigquery_client.query(query)
+        query_job.result()  # Wait for the query to complete
+        print(f"Successfully truncated table: {table_id}")
+    except Exception as e:
+        logging.error(f"Failed to truncate BigQuery table: {e}", exc_info=True)
+
+# Main Function
+if __name__ == "__main__":
+    try:
+        logging.basicConfig(level=logging.INFO)
+        logging.info(f"Running in environment: {ENV}")
+
+        print("\n--- Checking BigQuery Connectivity ---")
+        check_bigquery_connectivity()
+
+        print("\n--- Checking Spanner Connectivity ---")
+        check_spanner_connectivity()
+
+        print("\n--- Truncating BigQuery Table ---")
+        truncate_bigquery_table()
+
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {e}", exc_info=True)
+
+
++++++++++=
+
+
+import json
+import os
+from google.cloud import spanner
+from google.cloud import bigquery
+from google.api_core import retry
+import logging
+
+# Load Configuration from File
+def load_config(env):
+    with open("config.json", "r") as config_file:
+        config = json.load(config_file)
+        if env not in config["environments"]:
+            raise ValueError(f"Environment '{env}' not found in configuration file.")
+        return config["environments"][env]
+
+# Set Environment
+ENV = os.getenv("ENV", "dev")  # Default to 'dev' if ENV is not set
+CONFIG = load_config(ENV)
+
+# Initialize Spanner and BigQuery Clients
+spanner_client = spanner.Client()
+instance = spanner_client.instance(CONFIG["SPANNER_INSTANCE_ID"])
+database = instance.database(CONFIG["SPANNER_DATABASE_ID"])
+bigquery_client = bigquery.Client(project=CONFIG["BIGQUERY_PROJECT_ID"])
+
+# Function to handle Spanner-to-BigQuery type mapping (optional)
+def handle_field_value(field_type, value):
+    if field_type == "JSON" and isinstance(value, dict):
+        return json.dumps(value)  # Convert dict to JSON string
+    return value
+
+# Read Data from Spanner
+def read_from_spanner():
+    query = f"SELECT * FROM {CONFIG['SPANNER_TABLE_ID']}"
+    with database.snapshot() as snapshot:
+        result_set = snapshot.execute_sql(query)
+        rows = []
+        for row in result_set:
+            row_dict = dict(row.items())
+            for key, value in row_dict.items():
+                if isinstance(value, dict):  # Spanner JSON column returned as dict
+                    row_dict[key] = json.dumps(value)
+            rows.append(row_dict)
+    return rows
+
+# Insert Data into BigQuery
+def insert_to_bigquery(rows):
+    if not rows:
+        print("No data to insert.")
+        return
+
+    table_id = f"{CONFIG['BIGQUERY_PROJECT_ID']}.{CONFIG['BIGQUERY_DATASET_ID']}.{CONFIG['BIGQUERY_TABLE_ID']}"
+
+    errors = bigquery_client.insert_rows_json(
+        table_id, rows, retry=retry.Retry(deadline=600)
+    )
+
+    if errors:
+        for error in errors:
+            print(f"Error inserting row: {error}")
+    else:
+        print(f"Data loaded successfully into BigQuery table: {CONFIG['BIGQUERY_TABLE_ID']}")
+
+# Main Function
+if __name__ == "__main__":
+    try:
+        logging.basicConfig(level=logging.INFO)
+        logging.info(f"Running in environment: {ENV}")
+
+        # Read and insert data
+        rows = read_from_spanner()
+        insert_to_bigquery(rows)
+
+    except Exception as e:
+        logging.error(f"Error occurred: {e}", exc_info=True)
+
+
+
++++++===
+
+from google.cloud import spanner
+from google.cloud import bigquery
+from google.api_core import retry
+import logging
+import json
+
+# Configuration variables - Update these values with your specifics
+SPANNER_INSTANCE_ID = "your-spanner-instance-id"
+SPANNER_DATABASE_ID = "your-spanner-database-id"
+SPANNER_TABLE_ID = "your-spanner-table-id"
+BIGQUERY_PROJECT_ID = "your-bigquery-project-id"
+BIGQUERY_DATASET_ID = "your-bigquery-dataset-id"
+BIGQUERY_TABLE_ID = "your-bigquery-table-id"
+
+# Initialize Google Spanner client
+spanner_client = spanner.Client()
+instance = spanner_client.instance(SPANNER_INSTANCE_ID)
+database = instance.database(SPANNER_DATABASE_ID)
+
+# Initialize Google BigQuery client
+bigquery_client = bigquery.Client(project=BIGQUERY_PROJECT_ID)
+
+# Function to map Spanner data types to BigQuery data types (optional, for handling dynamic data)
+def map_spanner_to_bigquery(spanner_type):
+    if spanner_type == 'STRING':
+        return 'STRING'
+    elif spanner_type == 'INT64':
+        return 'INTEGER'
+    elif spanner_type == 'JSON':
+        return 'STRING'  # BigQuery JSON type may need to be handled as STRING if complex
+    # Add more mappings as needed
+    else:
+        raise ValueError(f"Unhandled Spanner type: {spanner_type}")
+
+# Handle the values from Spanner, especially handling JSON columns
+def handle_field_value(field_type, value):
+    if field_type == 'JSON' and isinstance(value, dict):
+        return json.dumps(value)  # Convert dict to JSON string
+    return value
+
+# Read data from Spanner
+def read_from_spanner():
+    query = f"SELECT * FROM {SPANNER_TABLE_ID}"
+    with database.snapshot() as snapshot:
+        result_set = snapshot.execute_sql(query)
+        rows = []
+        for row in result_set:
+            row_dict = dict(row.items())
+            # Convert JSON fields to a proper JSON string
+            for key, value in row_dict.items():
+                if isinstance(value, dict):  # Spanner JSON column returned as dict
+                    row_dict[key] = json.dumps(value)
+            rows.append(row_dict)
+    return rows
+
+# Insert data to BigQuery
+def insert_to_bigquery(rows):
+    if not rows:
+        print("No data to insert.")
+        return
+
+    # Define the destination table
+    table_id = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.{BIGQUERY_TABLE_ID}"
+
+    # Insert data into BigQuery
+    errors = bigquery_client.insert_rows_json(
+        table_id, rows, retry=retry.Retry(deadline=600)
+    )  # Retries for 10 minutes
+
+    if errors:
+        for error in errors:
+            print(f"Error inserting row: {error}")
+    else:
+        print(f"Data loaded successfully into BigQuery table: {BIGQUERY_TABLE_ID}")
+
+# Main function
+if __name__ == "__main__":
+    try:
+        logging.basicConfig(level=logging.INFO)
+        rows = read_from_spanner()
+        insert_to_bigquery(rows)
+    except Exception as e:
+        logging.error(f"Error occurred: {e}", exc_info=True)
+
 
 
 
