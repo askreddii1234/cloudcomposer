@@ -926,3 +926,140 @@ if __name__ == "__main__":
 
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}", exc_info=True)
++++++++++++++++
+
+from google.cloud import spanner
+from google.cloud import bigquery
+from google.api_core import retry
+import json
+
+# Function to truncate a BigQuery table
+def truncate_bigquery_table(bq_client, table_id):
+    """
+    Truncates the target BigQuery table by running a TRUNCATE TABLE query.
+    If the table does not exist, it skips truncation and lets the main function create the table.
+    Args:
+        bq_client (bigquery.Client): BigQuery client instance.
+        table_id (str): The target BigQuery table ID to truncate.
+    """
+    try:
+        query = f"TRUNCATE TABLE `{table_id}`"  # Truncate table SQL
+        query_job = bq_client.query(query)  # Execute the query
+        query_job.result()  # Wait for query completion
+        print(f"Table {table_id} truncated successfully.")
+    except Exception as e:
+        print(f"Table {table_id} does not exist or could not be truncated. Skipping truncation.")
+
+# Function to load Spanner data to BigQuery in batches
+def spanner_to_bigquery():
+    # Initialize Spanner client
+    spanner_client = spanner.Client(project=PROJECT_ID)
+    instance = spanner_client.instance(INSTANCE_ID)
+    database = instance.database(DATABASE_ID)
+
+    # Initialize BigQuery client
+    bq_client = bigquery.Client(project=PROJECT_ID)
+
+    # Define the BigQuery table ID
+    table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
+
+    # Truncate the BigQuery table before loading data
+    print("Truncating BigQuery table...")
+    truncate_bigquery_table(bq_client, table_id)
+
+    # Query the Spanner table
+    query = f"SELECT * FROM {TABLE_NAME}"
+    with database.snapshot() as snapshot:
+        result_set = snapshot.execute_sql(query)
+        rows = list(result_set)  # Fetch all rows
+
+    if not rows:
+        print(f"No data found in Spanner table {TABLE_NAME}.")
+        return
+
+    # Extract column names and types dynamically
+    fields = result_set.metadata.row_type.fields
+    bq_schema = []
+    for field in fields:
+        spanner_type = field.type_.code.name  # Spanner type (e.g., STRING, INT64, JSON)
+        bq_type = map_spanner_to_bigquery(spanner_type)
+        bq_schema.append(bigquery.SchemaField(field.name, bq_type))
+
+    # Create BigQuery table dynamically if it doesn't exist
+    table = bigquery.Table(table_id, schema=bq_schema)
+    table = bq_client.create_table(table, exists_ok=True)
+    print(f"BigQuery table {BQ_TABLE} created successfully with schema: {bq_schema}")
+
+    # Prepare rows to insert
+    rows_to_insert = [
+        {
+            fields[i].name: handle_field_value(fields[i].type_.code.name, value)
+            for i, value in enumerate(row)
+        }
+        for row in rows
+    ]
+
+    # Batch processing logic
+    BATCH_SIZE = 50  # Batch size of 50 records
+    for i in range(0, len(rows_to_insert), BATCH_SIZE):
+        batch = rows_to_insert[i:i + BATCH_SIZE]
+        insert_batch(batch, bq_client, table_id, i // BATCH_SIZE + 1)
+
+# Function to insert a batch of records into BigQuery
+def insert_batch(batch, bq_client, table_id, batch_number):
+    """
+    Inserts a batch of records into BigQuery.
+    Args:
+        batch (list): The batch of rows to insert.
+        bq_client (bigquery.Client): BigQuery client instance.
+        table_id (str): The target BigQuery table ID.
+        batch_number (int): The batch number for logging.
+    """
+    try:
+        errors = bq_client.insert_rows_json(table_id, batch, retry=retry.Retry(deadline=120))
+        if errors:
+            print(f"Errors occurred while inserting batch {batch_number}: {errors}")
+        else:
+            print(f"Batch {batch_number} inserted successfully.")
+    except Exception as e:
+        print(f"Error inserting batch {batch_number}: {str(e)}")
+
+# Function to handle field values for BigQuery insertion
+def handle_field_value(field_type, value):
+    """
+    Handles Spanner field values for insertion into BigQuery.
+    """
+    if field_type == "JSON" and value is not None:
+        return json.dumps(value)  # Serialize JSON fields
+    elif field_type == "TIMESTAMP" and value is not None:
+        return value.isoformat()  # Convert DatetimeWithNanoseconds to ISO 8601 string
+    else:
+        return value  # Return value as-is for other types
+
+# Function to map Spanner types to BigQuery types
+def map_spanner_to_bigquery(spanner_type):
+    """
+    Maps Spanner types to BigQuery types, including JSON support.
+    """
+    spanner_to_bq = {
+        "STRING": "STRING",
+        "INT64": "INTEGER",
+        "FLOAT64": "FLOAT",
+        "BOOL": "BOOLEAN",
+        "DATE": "DATE",
+        "TIMESTAMP": "TIMESTAMP",
+        "BYTES": "BYTES",
+        "JSON": "STRING",  # Map Spanner JSON to BigQuery STRING
+    }
+    return spanner_to_bq.get(spanner_type, "STRING")  # Default to STRING for unknown types
+
+if __name__ == "__main__":
+    # Define configuration constants (replace with your actual values)
+    PROJECT_ID = "your-gcp-project-id"
+    INSTANCE_ID = "your-spanner-instance-id"
+    DATABASE_ID = "your-spanner-database-id"
+    TABLE_NAME = "your-spanner-table-name"
+    BQ_DATASET = "your-bigquery-dataset-name"
+    BQ_TABLE = "your-bigquery-table-name"
+
+    spanner_to_bigquery()
