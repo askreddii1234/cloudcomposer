@@ -1063,3 +1063,208 @@ if __name__ == "__main__":
     BQ_TABLE = "your-bigquery-table-name"
 
     spanner_to_bigquery()
+
+
+
++++++++++++++
+
+
+from google.cloud import spanner
+from google.cloud import bigquery
+from google.api_core import retry
+import json
+from datetime import datetime, timedelta
+import configparser
+
+# Load configuration from file
+config = configparser.ConfigParser()
+config.read_dict({
+    'dev': {
+        'PROJECT_ID': 'your-dev-gcp-project-id',
+        'INSTANCE_ID': 'your-dev-spanner-instance-id',
+        'DATABASE_ID': 'your-dev-spanner-database-id',
+        'TABLE_NAME': 'your-dev-spanner-table-name',
+        'BQ_DATASET': 'your-dev-bigquery-dataset-name',
+        'BQ_TABLE': 'your-dev-bigquery-table-name',
+        'CONTROL_TABLE': 'your-dev-control-table-name'
+    },
+    'int': {
+        'PROJECT_ID': 'your-int-gcp-project-id',
+        'INSTANCE_ID': 'your-int-spanner-instance-id',
+        'DATABASE_ID': 'your-int-spanner-database-id',
+        'TABLE_NAME': 'your-int-spanner-table-name',
+        'BQ_DATASET': 'your-int-bigquery-dataset-name',
+        'BQ_TABLE': 'your-int-bigquery-table-name',
+        'CONTROL_TABLE': 'your-int-control-table-name'
+    },
+    'prod': {
+        'PROJECT_ID': 'your-prod-gcp-project-id',
+        'INSTANCE_ID': 'your-prod-spanner-instance-id',
+        'DATABASE_ID': 'your-prod-spanner-database-id',
+        'TABLE_NAME': 'your-prod-spanner-table-name',
+        'BQ_DATASET': 'your-prod-bigquery-dataset-name',
+        'BQ_TABLE': 'your-prod-bigquery-table-name',
+        'CONTROL_TABLE': 'your-prod-control-table-name'
+    }
+})
+
+# Function to load Spanner data to BigQuery incrementally
+def spanner_to_bigquery():
+    # Initialize Spanner client
+    spanner_client = spanner.Client(project=PROJECT_ID)
+    instance = spanner_client.instance(INSTANCE_ID)
+    database = instance.database(DATABASE_ID)
+
+    # Initialize BigQuery client
+    bq_client = bigquery.Client(project=PROJECT_ID)
+
+    # Define the BigQuery table ID
+    table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
+    control_table_id = f"{PROJECT_ID}.{BQ_DATASET}.{CONTROL_TABLE}"
+
+    # Query the Spanner table incrementally
+    # Assuming there is a `last_updated` column in the Spanner table to track changes
+    last_sync_time = get_last_sync_time(bq_client, control_table_id)
+    query = f"SELECT * FROM {TABLE_NAME} WHERE last_updated > @last_sync_time"
+    with database.snapshot() as snapshot:
+        result_set = snapshot.execute_sql(
+            query,
+            params={"last_sync_time": last_sync_time},
+            param_types={"last_sync_time": spanner.param_types.TIMESTAMP},
+        )
+        rows = list(result_set)  # Fetch all rows
+
+    if not rows:
+        print(f"No new data found in Spanner table {TABLE_NAME}.")
+        return
+
+    # Extract column names and types dynamically
+    fields = result_set.metadata.row_type.fields
+    bq_schema = []
+    for field in fields:
+        spanner_type = field.type_.code.name  # Spanner type (e.g., STRING, INT64, JSON)
+        bq_type = map_spanner_to_bigquery(spanner_type)
+        bq_schema.append(bigquery.SchemaField(field.name, bq_type))
+
+    # Create BigQuery table dynamically if it doesn't exist
+    table = bigquery.Table(table_id, schema=bq_schema)
+    table = bq_client.create_table(table, exists_ok=True)
+    print(f"BigQuery table {BQ_TABLE} ensured with schema: {bq_schema}")
+
+    # Prepare rows to insert
+    rows_to_insert = [
+        {
+            fields[i].name: handle_field_value(fields[i].type_.code.name, value)
+            for i, value in enumerate(row)
+        }
+        for row in rows
+    ]
+
+    # Batch processing logic
+    BATCH_SIZE = 50  # Batch size of 50 records
+    for i in range(0, len(rows_to_insert), BATCH_SIZE):
+        batch = rows_to_insert[i:i + BATCH_SIZE]
+        insert_batch(batch, bq_client, table_id, i // BATCH_SIZE + 1)
+        update_control_table(bq_client, control_table_id, batch)
+
+# Function to get the last sync time from the control table
+def get_last_sync_time(bq_client, control_table_id):
+    try:
+        query = f"SELECT MAX(last_updated) AS last_sync_time FROM `{control_table_id}`"
+        query_job = bq_client.query(query)
+        result = query_job.result()
+        for row in result:
+            if row["last_sync_time"] is not None:
+                return row["last_sync_time"]
+    except Exception as e:
+        print(f"Error retrieving last sync time: {str(e)}")
+    # Default to a very old date if no sync has been done yet
+    return datetime.utcnow() - timedelta(days=3650)
+
+# Function to update the control table with the latest sync information
+def update_control_table(bq_client, control_table_id, batch):
+    """
+    Updates the control table with the latest batch information.
+    Args:
+        bq_client (bigquery.Client): BigQuery client instance.
+        control_table_id (str): The control table ID.
+        batch (list): The batch of rows that were inserted.
+    """
+    last_updated = max(row.get('last_updated') for row in batch if 'last_updated' in row)
+    row_count = len(batch)
+    batch_id = datetime.utcnow().isoformat()
+    control_data = [{
+        "batch_id": batch_id,
+        "last_updated": last_updated,
+        "row_count": row_count,
+        "processed_at": datetime.utcnow().isoformat()
+    }]
+    try:
+        errors = bq_client.insert_rows_json(control_table_id, control_data, retry=retry.Retry(deadline=120))
+        if errors:
+            print(f"Errors occurred while updating control table: {errors}")
+        else:
+            print(f"Control table updated successfully with batch ID {batch_id}.")
+    except Exception as e:
+        print(f"Error updating control table: {str(e)}")
+
+# Function to insert a batch of records into BigQuery
+def insert_batch(batch, bq_client, table_id, batch_number):
+    """
+    Inserts a batch of records into BigQuery.
+    Args:
+        batch (list): The batch of rows to insert.
+        bq_client (bigquery.Client): BigQuery client instance.
+        table_id (str): The target BigQuery table ID.
+        batch_number (int): The batch number for logging.
+    """
+    try:
+        errors = bq_client.insert_rows_json(table_id, batch, retry=retry.Retry(deadline=120))
+        if errors:
+            print(f"Errors occurred while inserting batch {batch_number}: {errors}")
+        else:
+            print(f"Batch {batch_number} inserted successfully.")
+    except Exception as e:
+        print(f"Error inserting batch {batch_number}: {str(e)}")
+
+# Function to handle field values for BigQuery insertion
+def handle_field_value(field_type, value):
+    """
+    Handles Spanner field values for insertion into BigQuery.
+    """
+    if field_type == "JSON" and value is not None:
+        return value  # Use JSON datatype directly
+    elif field_type == "TIMESTAMP" and value is not None:
+        return value.isoformat()  # Convert DatetimeWithNanoseconds to ISO 8601 string
+    else:
+        return value  # Return value as-is for other types
+
+# Function to map Spanner types to BigQuery types
+def map_spanner_to_bigquery(spanner_type):
+    """
+    Maps Spanner types to BigQuery types, including JSON support.
+    """
+    spanner_to_bq = {
+        "STRING": "STRING",
+        "INT64": "INTEGER",
+        "FLOAT64": "FLOAT",
+        "BOOL": "BOOLEAN",
+        "DATE": "DATE",
+        "TIMESTAMP": "TIMESTAMP",
+        "BYTES": "BYTES",
+        "JSON": "JSON",  # Map Spanner JSON to BigQuery JSON
+    }
+    return spanner_to_bq.get(spanner_type, "STRING")  # Default to STRING for unknown types
+
+if __name__ == "__main__":
+    # Define configuration constants from the config dictionary
+    ENVIRONMENT = "dev"  # Set the environment ('dev', 'int', 'prod')
+    PROJECT_ID = config[ENVIRONMENT]['PROJECT_ID']
+    INSTANCE_ID = config[ENVIRONMENT]['INSTANCE_ID']
+    DATABASE_ID = config[ENVIRONMENT]['DATABASE_ID']
+    TABLE_NAME = config[ENVIRONMENT]['TABLE_NAME']
+    BQ_DATASET = config[ENVIRONMENT]['BQ_DATASET']
+    BQ_TABLE = config[ENVIRONMENT]['BQ_TABLE']
+    CONTROL_TABLE = config[ENVIRONMENT]['CONTROL_TABLE']
+
+    spanner_to_bigquery()
