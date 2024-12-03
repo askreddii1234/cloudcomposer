@@ -1268,3 +1268,227 @@ if __name__ == "__main__":
     CONTROL_TABLE = config[ENVIRONMENT]['CONTROL_TABLE']
 
     spanner_to_bigquery()
+
+
+
+
++++++++++++++++++++
+
+
+# spanner_to_bigquery.py
+import uuid
+from datetime import datetime, timedelta
+from google.cloud import spanner
+from google.cloud import bigquery
+from google.api_core import retry
+import json
+
+# Function to load Spanner data to BigQuery incrementally
+def spanner_to_bigquery(environment):
+    # Set environment variables dynamically
+    PROJECT_ID = config[environment]['PROJECT_ID']
+    INSTANCE_ID = config[environment]['INSTANCE_ID']
+    DATABASE_ID = config[environment]['DATABASE_ID']
+    TABLE_NAME = config[environment]['TABLE_NAME']
+    BQ_DATASET = config[environment]['BQ_DATASET']
+    BQ_TABLE = config[environment]['BQ_TABLE']
+    CONTROL_TABLE = config[environment]['CONTROL_TABLE']
+
+    # Initialize Spanner client
+    spanner_client = spanner.Client(project=PROJECT_ID)
+    instance = spanner_client.instance(INSTANCE_ID)
+    database = instance.database(DATABASE_ID)
+
+    # Initialize BigQuery client
+    bq_client = bigquery.Client(project=PROJECT_ID)
+
+    # Create control table if it does not exist
+    create_control_table_if_not_exists(database, CONTROL_TABLE)
+
+    # Define the BigQuery table ID
+    table_id = f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
+
+    # Get the last sync time from the control table or a default value
+    last_sync_time = get_last_sync_time(database, CONTROL_TABLE)
+
+    print(f"Latest timestamp in Spanner table: {TABLE_NAME} since {last_sync_time}.")
+
+    # Query the Spanner table incrementally, using UTC for consistency
+    # Use >= for incremental records to avoid skipping recent records with same timestamps
+    query = f"SELECT * FROM {TABLE_NAME} WHERE created_dttm >= '{last_sync_time}' ORDER BY created_dttm"
+
+    with database.snapshot() as snapshot:
+        result_set = snapshot.execute_sql(query)
+        rows = list(result_set)  # Fetch all rows
+
+    if not rows:
+        print(f"No new data found in Spanner table {TABLE_NAME}.")
+        return
+
+    # Extract column names and types dynamically
+    fields = result_set.metadata.row_type.fields
+    bq_schema = []
+    for field in fields:
+        spanner_type = field.type_.code.name  # Spanner type (e.g., STRING, INT64, JSON)
+        bq_type = map_spanner_to_bigquery(spanner_type)
+        bq_schema.append(bigquery.SchemaField(field.name, bq_type))
+
+    # Create BigQuery table dynamically if it doesn't exist
+    table = bigquery.Table(table_id, schema=bq_schema)
+    table = bq_client.create_table(table, exists_ok=True)
+    print(f"BigQuery table {BQ_TABLE} ensured with schema: {bq_schema}")
+
+    # Prepare rows to insert
+    rows_to_insert = [
+        {
+            fields[i].name: handle_field_value(fields[i].type_.code.name, value)
+            for i, value in enumerate(row)
+        }
+        for row in rows
+    ]
+
+    if not rows_to_insert:
+        print("No rows to insert after fetching from Spanner.")
+        return
+    else:
+        print(f"Fetched {len(rows)} rows from Spanner.")
+
+    # Generate a unique batch ID for this ingestion
+    batch_id = str(uuid.uuid4())
+
+    # Batch processing logic
+    BATCH_SIZE = 50  # Batch size of 50 records
+    all_batches_successful = True
+    for i in range(0, len(rows_to_insert), BATCH_SIZE):
+        batch = rows_to_insert[i:i + BATCH_SIZE]
+        successful = insert_batch(batch, bq_client, table_id, i // BATCH_SIZE + 1)
+        if not successful:
+            all_batches_successful = False
+            print(f"Batch {i // BATCH_SIZE + 1} ingestion failed. Skipping control table update for this batch.")
+        else:
+            print(f"Batch {i // BATCH_SIZE + 1} ingested successfully.")
+
+    # Update control table only if all batches were successfully ingested
+    if all_batches_successful:
+        update_control_table(database, CONTROL_TABLE, rows_to_insert, batch_id)
+    else:
+        print("Not all batches were successfully ingested. Control table will not be updated.")
+
+# Function to create the control table in Spanner if it does not exist
+def create_control_table_if_not_exists(database, control_table_id):
+    with database.snapshot() as snapshot:
+        try:
+            snapshot.execute_sql(f"SELECT * FROM {control_table_id} LIMIT 1")
+            print(f"Control table {control_table_id} already exists.")
+        except Exception as e:
+            print(f"Control table {control_table_id} does not exist. Creating now...")
+            operation = database.update_ddl([
+                f"CREATE TABLE {control_table_id} (
+                    batch_id STRING(MAX) NOT NULL,
+                    last_updated TIMESTAMP NOT NULL,
+                    row_count INT64 NOT NULL,
+                    processed_at TIMESTAMP NOT NULL
+                ) PRIMARY KEY (batch_id)"
+            ])
+            operation.result()  # Wait for the operation to complete
+            print(f"Control table {control_table_id} created successfully.")
+
+# Function to get the last sync time from the control table in Spanner
+def get_last_sync_time(database, control_table_id):
+    query = f"SELECT MAX(last_updated) AS last_sync_time FROM {control_table_id}"
+    with database.snapshot() as snapshot:
+        result_set = snapshot.execute_sql(query)
+        for row in result_set:
+            if row["last_sync_time"] is not None:
+                return row["last_sync_time"]
+    # Default to a very old date if no sync has been done yet
+    print("No existing sync time found in control table. Using default start time.")
+    return datetime(1970, 1, 1)  # Default to a very old date if no prior record exists
+
+# Function to update the control table with the latest sync information in Spanner
+def update_control_table(database, control_table_id, rows, batch_id):
+    if not rows:
+        print("No rows to update the control table.")
+        return
+
+    # Extract maximum created_dttm value from the rows
+    last_updated_values = [row.get('created_dttm') for row in rows if row.get('created_dttm') is not None]
+    if not last_updated_values:
+        print("No valid 'created_dttm' values found in the rows to update the control table.")
+        return
+
+    last_updated = max(last_updated_values)
+    row_count = len(rows)
+
+    # Insert or update control data in Spanner
+    with database.batch() as batch:
+        batch.insert_or_update(
+            table=control_table_id,
+            columns=('batch_id', 'last_updated', 'row_count', 'processed_at'),
+            values=[(
+                batch_id,
+                last_updated,
+                row_count,
+                datetime.utcnow()
+            )]
+        )
+
+    print(f"Control table updated successfully with batch ID: {batch_id}, last_updated: {last_updated}, row_count: {row_count}")
+
+# Function to insert a batch of records into BigQuery
+def insert_batch(batch, bq_client, table_id, batch_number):
+    """
+    Inserts a batch of records into BigQuery.
+    Args:
+        batch (list): The batch of rows to insert.
+        bq_client (bigquery.Client): BigQuery client instance.
+        table_id (str): The target BigQuery table ID.
+        batch_number (int): The batch number for logging.
+    """
+    try:
+        errors = bq_client.insert_rows_json(table_id, batch, retry=retry.Retry(deadline=120))
+        if errors:
+            print(f"Errors occurred while inserting batch {batch_number}: {errors}")
+            # If there are errors, log them and return False to indicate failure
+            return False
+        else:
+            print(f"Batch {batch_number} inserted successfully.")
+            return True
+    except Exception as e:
+        print(f"Error inserting batch {batch_number}: {str(e)}")
+        return False
+
+# Function to handle field values for BigQuery insertion
+def handle_field_value(field_type, value):
+    """
+    Handles Spanner field values for insertion into BigQuery.
+    """
+    if field_type == "JSON" and value is not None:
+        return json.dumps(value)  # Serialize JSON fields to ensure proper format for BigQuery
+    elif field_type == "TIMESTAMP" and value is not None:
+        return value.isoformat()  # Convert DatetimeWithNanoseconds to ISO 8601 string
+    elif isinstance(value, dict):  # Handle nested records or JSON fields
+        return json.dumps(value)  # Serialize dictionaries to JSON
+    else:
+        return value  # Return value as-is for other types
+
+# Function to map Spanner types to BigQuery types
+def map_spanner_to_bigquery(spanner_type):
+    """
+    Maps Spanner types to BigQuery types, including JSON support.
+    """
+    spanner_to_bq = {
+        "STRING": "STRING",
+        "INT64": "INTEGER",
+        "FLOAT64": "FLOAT",
+        "BOOL": "BOOLEAN",
+        "DATE": "DATE",
+        "TIMESTAMP": "TIMESTAMP",
+        "BYTES": "BYTES",
+        "JSON": "JSON",  # Map Spanner JSON to BigQuery JSON
+    }
+    return spanner_to_bq.get(spanner_type, "STRING")  # Default to STRING for unknown types
+
+
+
+
